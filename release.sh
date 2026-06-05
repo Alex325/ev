@@ -1,0 +1,1 @@
+./configure.sh Release && cmake --build ./build/configure/Release

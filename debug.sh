@@ -1,0 +1,1 @@
+./configure.sh Debug && cmake --build ./build/configure/Debug
