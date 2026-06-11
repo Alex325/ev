@@ -2,6 +2,7 @@
 #include <unistd.h>
 #include <stdlib.h>
 #include <poll.h>
+#include <signal.h>
 
 static struct pollfd pfd = {
     .fd = STDIN_FILENO,
@@ -15,15 +16,27 @@ typedef enum MODE {
     MODE_EDIT
 } MODE;
 
+typedef struct
+{
+    char pressed_key[3];
+    int length;
+} Input;
+
 static struct {
     char *screen;
     MODE mode;
+    Input input;
     int should_close;
     int should_save;
-} state;
+    int should_resize;
+} state = { 0 };
+
+void handle_resize() {
+
+}
 
 void on_window_resize(int _) {
-
+    state.should_resize = 1;
 }
 
 void disable_raw_terminal() {
@@ -33,7 +46,8 @@ void disable_raw_terminal() {
 
 void enable_raw_terminal() {
     struct termios terminal = orig;
-    terminal.c_lflag &= ~(ECHO | ICANON | ISIG);
+    terminal.c_lflag &= ~(ECHO | ICANON | ISIG | IEXTEN);
+    terminal.c_oflag &= ~(OPOST) | OPOST;
     terminal.c_cc[VTIME] = 0;
     terminal.c_cc[VMIN] = 0;
     tcsetattr(STDIN_FILENO, TCSAFLUSH, &terminal);
@@ -49,31 +63,29 @@ void setup() {
     tcgetattr(STDIN_FILENO, &orig);
     atexit(cleanup);
     enable_raw_terminal();
+    signal(SIGWINCH, on_window_resize);
 }
 
 void poll_input() {
 
     poll(&pfd, 1, -1);
 
-    char red = 0;
-
-    char rite[] = "Tecla lida: 0\n";
-
-    int readd = read(STDIN_FILENO, &red, 1);
-
-    if (readd > 0)
-        rite[12] = red;
-    write(STDOUT_FILENO, rite, 14);
-
-    if (red == 'q')
-    {
-        state.should_close = 1;
-    }
-    
+    int bytes_read = read(STDIN_FILENO, state.input.pressed_key, 3);
+    state.input.length = bytes_read;
 }
 
 void update() {
+    if (state.input.pressed_key[0] == 'q')
+    {
+        state.should_close = 1;
+    }
 
+    if (state.should_resize)
+    {
+        state.should_resize = 0;
+        handle_resize();
+    }
+    
 }
 
 void render() {
