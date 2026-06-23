@@ -25,6 +25,11 @@ typedef enum MODE {
     MODE_EDIT
 } MODE;
 
+typedef enum {
+    ACTION_BACKSPACE,
+    ACTION_DELETE
+} DELETE_ACTION;
+
 typedef struct
 {
     char pressed_key[9];
@@ -121,6 +126,44 @@ void add_char(char c, int line, int column) {
     state.cursor.column++;
 }
 
+void delete_char(DELETE_ACTION action, int line, int column) {
+
+    switch (action)
+    {
+        case ACTION_BACKSPACE:
+            if (column == 0)
+            {
+                if (line == 0) return;
+        
+                const int new_column = state.document.lines[line-1].size;
+        
+                document_merge_line(&state.document, line);
+                
+                state.cursor.line--;
+                state.cursor.column = new_column;
+        
+                return;
+            }
+            
+            document_delete_char(&state.document, line, column);
+            state.cursor.column--;
+        break;
+    
+        case ACTION_DELETE:
+            if (column == state.document.lines[line].size)
+            {
+                if (line == state.document.size-1) return;
+                document_merge_line(&state.document, line+1);
+                return;
+            }
+            
+            document_delete_char(&state.document, line, column+1);
+
+        default:
+            break;
+    }
+}
+
 void break_line(int line, int column) {
     document_break_line(&state.document, line, column);
     state.cursor.line++;
@@ -182,6 +225,9 @@ void handle_edit_input(const input_t *input) {
             case 0xa:
                 break_line(state.cursor.line, state.cursor.column);
                 break;
+            case 0x7f:
+                delete_char(ACTION_BACKSPACE, state.cursor.line, state.cursor.column);
+                break;
         }
     }
     else
@@ -204,14 +250,15 @@ void handle_edit_input(const input_t *input) {
                 case 'D':
                     move_cursor_left();
                     break;
-                
+                case '3':
+                    if (input->pressed_key[3] == '~')
+                        delete_char(ACTION_DELETE, state.cursor.line, state.cursor.column);
+                    break;
                 default:
                     break;
                 }
-
-            }            
+            }
         }
-        
     }
 }
 
@@ -260,13 +307,11 @@ void update() {
 
 void render() {
 
+    const int row_size = state.window_size.ws_col;
     clear_screen();
     write(STDOUT_FILENO, "\e[H", 3);
 
-    const int row_size = state.window_size.ws_col;
-
     int start = 0;
-
     int cached_start = 0;
 
     for (size_t i = screen_cursor.start_line; i < state.document.size; i++)

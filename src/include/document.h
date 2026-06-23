@@ -14,5 +14,7 @@ typedef struct {
 
 document_t document_new();
 void document_add_char(document_t *this, unsigned char chr, int line, int column);
+void document_merge_line(document_t *this, int line);
+void document_delete_char(document_t *this, int line, int column);
 void document_break_line(document_t *this, int line, int column);
 void document_destroy(document_t *document);
