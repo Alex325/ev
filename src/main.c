@@ -7,9 +7,10 @@
 #include <string.h>
 #include <stdio.h>
 #include <math.h>
+#include <fcntl.h>
 #include <document.h>
 
-#define debug(str) write(STDOUT_FILENO, str, strlen(str))
+#define writel(str) write(STDOUT_FILENO, str, strlen(str))
 #define max(a, b) ((a > b) ? (a) : (b))
 #define min(a, b) ((a < b) ? (a) : (b))
 
@@ -22,7 +23,8 @@ static struct termios orig;
 
 typedef enum MODE {
     MODE_COMMAND,
-    MODE_EDIT
+    MODE_EDIT,
+    MODE_SAVE
 } MODE;
 
 typedef enum {
@@ -48,6 +50,11 @@ struct {
     int start_column;
 } screen_cursor = {0};
 
+typedef struct {
+    char name[256];
+    int size;
+} filename_t;
+
 static struct {
     char *screen;
     int screen_length;
@@ -55,16 +62,84 @@ static struct {
     input_t input;
     document_t document;
     cursor_t cursor;
+    cursor_t filename_cursor;
     int should_close;
-    int should_save;
     int should_resize;
     struct winsize window_size;
+    filename_t filename;
 } state = { 0 };
 
+void move_filename_cursor_right() {
+    state.filename_cursor.column = min(state.filename_cursor.column + 1, state.filename.size);    
+}
 
-void init_state() {
+void move_filename_cursor_left() {
+    state.filename_cursor.column = max(state.filename_cursor.column - 1, 0);
+}
+
+filename_t filename_new(const char *file) {
+
+    filename_t filename = { 0 };
+    
+    if (!file)
+    {
+        filename.size = 0;
+    }
+    else
+    {
+        const int filename_size = strlen(file);
+        filename.size = filename_size;
+        memcpy(filename.name, file, filename_size);
+    }
+    
+    return filename;
+}
+
+void filename_shift(filename_t *this, int column) {
+    for (int i = this->size - 1; i >= column; i--)
+    {
+        this->name[i + 1] = this->name[i];
+    }
+    this->size++;
+}
+
+void filename_add_char(filename_t *this, unsigned char chr, int column) {
+    if (state.filename_cursor.column == 256) return;
+    if (this->size == 255) return;
+    filename_shift(this, column);
+    this->name[column] = chr;
+    move_filename_cursor_right();
+}
+
+void filename_unshift(filename_t *this, int column) {
+    for (int i = column - 1; i < this->size - 1; i++)
+    {
+        this->name[i] = this->name[i+1];
+    }
+    this->size--;
+    this->name[this->size] = 0;
+}
+
+void filename_delete_char(filename_t *this, int column) {
+    if (state.filename_cursor.column == 0) return;
+    if (this->size == 0) return;
+    filename_unshift(this, column);
+    move_filename_cursor_left();
+}
+
+void hide_cursor() {
+    writel("\e[?25l");
+}
+
+void show_cursor() {
+    writel("\e[?25h");
+}
+
+void init_state(const char *filename) {
     state.document = document_new();
-    state.mode = MODE_EDIT;
+    state.filename = filename_new(filename);
+    state.mode = MODE_COMMAND;
+    hide_cursor();
 }
 
 void clear_screen() {
@@ -87,7 +162,7 @@ void on_window_resize(int _) {
 
 void disable_raw_terminal() {
     tcsetattr(STDIN_FILENO, TCSAFLUSH, &orig);
-    write(STDOUT_FILENO, "\x1b[?1049l", 8);
+    writel("\x1b[?1049l");
 }
 
 void enable_raw_terminal() {
@@ -97,27 +172,67 @@ void enable_raw_terminal() {
     terminal.c_cc[VTIME] = 0;
     terminal.c_cc[VMIN] = 0;
     tcsetattr(STDIN_FILENO, TCSAFLUSH, &terminal);
-    write(STDOUT_FILENO, "\x1b[?1049h", 8);
-    write(STDOUT_FILENO, "\x1b[H", 3);
+    writel("\x1b[?1049h");
+    writel("\x1b[H");
 }
+
 
 void cleanup() {
     disable_raw_terminal();
+    show_cursor();
     document_destroy(&state.document);
 }
 
-void setup() {
+void setup(const char *filename) {
     tcgetattr(STDIN_FILENO, &orig);
     atexit(cleanup);
     enable_raw_terminal();
-    init_state();
+    init_state(filename);
     signal(SIGWINCH, on_window_resize);
     handle_resize();
+}
+
+void set_mode(MODE mode) {
+    state.mode = mode;
+}
+
+
+void ensure_cursor_visible()
+{
+    while (state.cursor.line < screen_cursor.start_line)
+        screen_cursor.start_line--;
+
+    while (1)
+    {
+        int rows = 0;
+
+        for (int i = screen_cursor.start_line;
+             i <= state.cursor.line;
+             i++)
+        {
+            rows += max(
+                1,
+                (state.document.lines[i].size +
+                 state.window_size.ws_col - 1)
+                / state.window_size.ws_col
+            );
+        }
+
+        if (rows <= state.window_size.ws_row)
+            break;
+
+        screen_cursor.start_line++;
+    }
 }
 
 int try_write_line(const line_t *line, int start, int line_column) {
     int to_write = min(state.screen_length - start, line->size);
     memcpy(state.screen + start, line->text + line_column, to_write);
+    return to_write;
+}
+int try_write(const filename_t *line, int start, int start_column) {
+    int to_write = min(state.screen_length - start - 1, line->size);
+    memcpy(state.screen + start, line->name + start_column, to_write);
     return to_write;
 }
 
@@ -209,6 +324,7 @@ void move_cursor_left() {
     }
 }
 
+
 void handle_edit_input(const input_t *input) {
     if (input->length == 1)
     {
@@ -227,6 +343,10 @@ void handle_edit_input(const input_t *input) {
                 break;
             case 0x7f:
                 delete_char(ACTION_BACKSPACE, state.cursor.line, state.cursor.column);
+                break;
+            case 0x1b:
+                set_mode(MODE_COMMAND);
+                hide_cursor();
                 break;
         }
     }
@@ -263,7 +383,88 @@ void handle_edit_input(const input_t *input) {
 }
 
 void handle_command_input(const input_t *input) {
+    if (input->length != 1) return;
 
+    const char key = input->pressed_key[0];
+
+    switch (key)
+    {
+    case 'e':
+        set_mode(MODE_EDIT);
+        show_cursor();
+        break;
+    case 's':
+        set_mode(MODE_SAVE);
+        show_cursor();
+        break;
+    case 'q':
+        state.should_close = 1;
+        break;
+    default:
+        break;
+    }
+    
+}
+
+int is_allowed_character(unsigned int chr) {
+    return (chr >= 'A' && chr <= 'Z') || (chr >= 'a' && chr <= 'z') || (chr >= '0' && chr <= '9') || chr == '.' || chr == ',' || chr == '_' || chr == ' ';
+}
+
+void file_save() {
+    int fd = open(state.filename.name, O_WRONLY | O_TRUNC | O_CREAT, 0644);
+    save_str_t to_save = document_to_string(&state.document);
+    write(fd, to_save.text, to_save.size);
+    close(fd);
+    free(to_save.text);
+}
+
+void handle_save_input(const input_t *input) {
+    if (input->length == 1) {
+        const char key = input->pressed_key[0];
+
+        if (is_allowed_character(key))
+        {
+            filename_add_char(&state.filename, key, state.filename_cursor.column);
+            return;
+        }
+        
+
+        switch (key)
+        {
+        case 0x1b:
+            set_mode(MODE_COMMAND);
+            hide_cursor();
+            break;
+        case 0x7f:
+            filename_delete_char(&state.filename, state.filename_cursor.column);
+            break;
+        case 0xa:
+            file_save();
+            set_mode(MODE_COMMAND);
+            hide_cursor();
+            break;
+
+        default:
+            break;
+        }
+    }
+    else {
+        if (input->pressed_key[0] == 0x1b)
+        {
+            if (input->pressed_key[1] == '[')
+            {
+                switch (input->pressed_key[2])
+                {
+                case 'C':
+                    move_filename_cursor_right();
+                    break;
+                case 'D':
+                    move_filename_cursor_left();
+                    break;
+                }
+            }
+        }
+    }
 }
 
 void poll_input() {
@@ -300,22 +501,23 @@ void update() {
         case MODE_COMMAND:
             handle_command_input(&state.input);
             break;
+        case MODE_SAVE:
+            handle_save_input(&state.input);
+            break;
     }
 
+    ensure_cursor_visible();
 
 }
 
-void render() {
-
-    const int row_size = state.window_size.ws_col;
-    clear_screen();
-    write(STDOUT_FILENO, "\e[H", 3);
-
+void render_edit(int row_size) {
     int start = 0;
     int cached_start = 0;
 
     for (size_t i = screen_cursor.start_line; i < state.document.size; i++)
     {
+        if (start >= state.screen_length) break;
+
         const line_t *line = &state.document.lines[i];
 
         int written = try_write_line(line, start, i == screen_cursor.start_line ? screen_cursor.start_column : 0);
@@ -331,9 +533,47 @@ void render() {
 
     screen_cursor.row = screen_offset / row_size + 1;
     screen_cursor.col = screen_offset % row_size + 1;
+}
+
+#define strl(str) str, strlen(str)
+void render_command(int row_size) {
+    memcpy(state.screen, strl("EDITOR VISUAL"));
+    memcpy(state.screen + row_size, strl("s = salvar"));
+    memcpy(state.screen + 2*row_size, strl("e = editar"));
+    memcpy(state.screen + 3*row_size, strl("q = sair"));
+}
+
+void render_save(int row_size) {
+    memcpy(state.screen, strl("EDITOR VISUAL"));
+    memcpy(state.screen + row_size, strl("Digite um nome"));
+    memcpy(state.screen + 2*row_size, strl("esc = modo de comando"));
+    memcpy(state.screen + 3*row_size, strl("enter = salvar"));
+    try_write(&state.filename, state.screen_length - row_size, max(state.filename_cursor.column - row_size, 0));
+
+    screen_cursor.col = state.filename_cursor.column + 1;
+    screen_cursor.row = state.window_size.ws_row;
+
+}
+
+void render() {
+    const int row_size = state.window_size.ws_col;
+    clear_screen();
+    write(STDOUT_FILENO, "\e[H", 3);
+
+    switch (state.mode) {
+        case MODE_EDIT:
+            render_edit(row_size);
+            break;
+
+        case MODE_COMMAND:
+            render_command(row_size);
+            break;
+        case MODE_SAVE:
+            render_save(row_size);
+            break;
+    }
 
     char cur_seq[12] = "";
-
     sprintf(cur_seq, "\e[%d;%dH", screen_cursor.row, screen_cursor.col);
     write(STDOUT_FILENO, state.screen, state.screen_length);
     write(STDOUT_FILENO, cur_seq, strlen(cur_seq));
@@ -350,7 +590,8 @@ void loop() {
     
 }
 
-int main() {
-    setup();
+int main(int argc, char **argv) {
+    setup(argv[1]);
+    render();
     loop();
 }

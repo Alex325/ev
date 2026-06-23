@@ -114,6 +114,36 @@ void document_delete_char(document_t *this, int line, int column) {
     line_delete_char(&this->lines[line], column);
 }
 
+save_str_t document_to_string(document_t *this) {
+    save_str_t ret = {0};
+
+    int final_size = 0;
+
+    for (size_t i = 0; i < this->size; i++)
+    {
+        final_size += this->lines[i].size;
+    }
+
+    final_size += this->size - 1;
+    
+    ret.text = malloc(final_size);
+    ret.size = final_size;
+
+    int str_ptr = 0;
+
+    for (size_t i = 0; i < this->size; i++)
+    {
+        memcpy(ret.text + str_ptr, this->lines[i].text, this->lines[i].size);
+        str_ptr += this->lines[i].size + 1;
+        if (i != this->size-1)
+        {
+            ret.text[str_ptr-1] = '\n';
+        }
+        
+    }
+
+    return ret;
+}
 
 void document_destroy(document_t *document) {
 
