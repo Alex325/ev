@@ -4,15 +4,18 @@
 #include <poll.h>
 #include <signal.h>
 #include <sys/ioctl.h>
+#include <sys/stat.h>
 #include <string.h>
 #include <stdio.h>
 #include <math.h>
 #include <fcntl.h>
 #include <document.h>
+#include <cursor.h>
+#include <filename.h>
+#include <minmax.h>
 
 #define writel(str) write(STDOUT_FILENO, str, strlen(str))
-#define max(a, b) ((a > b) ? (a) : (b))
-#define min(a, b) ((a < b) ? (a) : (b))
+
 
 static struct pollfd pfd = {
     .fd = STDIN_FILENO,
@@ -24,7 +27,8 @@ static struct termios orig;
 typedef enum MODE {
     MODE_COMMAND,
     MODE_EDIT,
-    MODE_SAVE
+    MODE_SAVE,
+    MODE_INSERT_FILE
 } MODE;
 
 typedef enum {
@@ -38,22 +42,12 @@ typedef struct
     int length;
 } input_t;
 
-typedef struct {
-    int line;
-    int column;
-} cursor_t;
-
 struct {
     int row;
     int col;
     int start_line;
     int start_column;
 } screen_cursor = {0};
-
-typedef struct {
-    char name[256];
-    int size;
-} filename_t;
 
 static struct {
     char *screen;
@@ -62,69 +56,32 @@ static struct {
     input_t input;
     document_t document;
     cursor_t cursor;
-    cursor_t filename_cursor;
+    cursor_t filename_open_cursor;
+    cursor_t filename_insert_cursor;
     int should_close;
     int should_resize;
     struct winsize window_size;
-    filename_t filename;
+    filename_t filename_open;
+    filename_t filename_insert;
 } state = { 0 };
 
-void move_filename_cursor_right() {
-    state.filename_cursor.column = min(state.filename_cursor.column + 1, state.filename.size);    
-}
 
-void move_filename_cursor_left() {
-    state.filename_cursor.column = max(state.filename_cursor.column - 1, 0);
-}
+void file_insert(const char* filename) {
+    int file_fd = open(filename, O_RDONLY);
+    if (file_fd < 0) return;
 
-filename_t filename_new(const char *file) {
+    struct stat file_info;
 
-    filename_t filename = { 0 };
-    
-    if (!file)
+    if (fstat(file_fd, &file_info) == 0)
     {
-        filename.size = 0;
+        const int size = file_info.st_size;
+        char *file_cont = malloc(size*sizeof(*file_cont));
+        int red = read(file_fd, file_cont, size);
+        document_add_text(&state.document, file_cont, red, state.cursor.line, state.cursor.column);
+        free(file_cont);
     }
-    else
-    {
-        const int filename_size = strlen(file);
-        filename.size = filename_size;
-        memcpy(filename.name, file, filename_size);
-    }
-    
-    return filename;
-}
 
-void filename_shift(filename_t *this, int column) {
-    for (int i = this->size - 1; i >= column; i--)
-    {
-        this->name[i + 1] = this->name[i];
-    }
-    this->size++;
-}
-
-void filename_add_char(filename_t *this, unsigned char chr, int column) {
-    if (state.filename_cursor.column == 256) return;
-    if (this->size == 255) return;
-    filename_shift(this, column);
-    this->name[column] = chr;
-    move_filename_cursor_right();
-}
-
-void filename_unshift(filename_t *this, int column) {
-    for (int i = column - 1; i < this->size - 1; i++)
-    {
-        this->name[i] = this->name[i+1];
-    }
-    this->size--;
-    this->name[this->size] = 0;
-}
-
-void filename_delete_char(filename_t *this, int column) {
-    if (state.filename_cursor.column == 0) return;
-    if (this->size == 0) return;
-    filename_unshift(this, column);
-    move_filename_cursor_left();
+    close(file_fd);
 }
 
 void hide_cursor() {
@@ -137,7 +94,13 @@ void show_cursor() {
 
 void init_state(const char *filename) {
     state.document = document_new();
-    state.filename = filename_new(filename);
+    state.filename_open = filename_new(filename);
+    state.filename_insert = filename_new(NULL);
+
+    if (state.filename_open.size > 0) {
+        file_insert(state.filename_open.name);
+    }
+
     state.mode = MODE_COMMAND;
     hide_cursor();
 }
@@ -195,7 +158,6 @@ void setup(const char *filename) {
 void set_mode(MODE mode) {
     state.mode = mode;
 }
-
 
 void ensure_cursor_visible()
 {
@@ -285,7 +247,7 @@ void break_line(int line, int column) {
     state.cursor.column = 0;
 }
 
-void move_cursor_up() {
+void move_screen_cursor_up() {
     if (state.cursor.column/state.window_size.ws_col == 0) {
         state.cursor.line = max(state.cursor.line - 1, 0);
         state.cursor.column = min(state.cursor.column % state.window_size.ws_col, state.document.lines[state.cursor.line].size);
@@ -295,7 +257,7 @@ void move_cursor_up() {
     state.cursor.column = max(min(state.cursor.column - state.window_size.ws_col, state.document.lines[state.cursor.line].size), 0);
 }
 
-void move_cursor_down() {
+void move_screen_cursor_down() {
     if (state.cursor.column/state.window_size.ws_col >= state.document.lines[state.cursor.line].size/state.window_size.ws_col) {
         state.cursor.line = min(state.cursor.line + 1, state.document.size - 1);
         state.cursor.column = min(state.cursor.column % state.window_size.ws_col, state.document.lines[state.cursor.line].size % state.window_size.ws_col);
@@ -305,7 +267,7 @@ void move_cursor_down() {
     state.cursor.column = min(state.cursor.column + state.window_size.ws_col, state.document.lines[state.cursor.line].size);
 }
 
-void move_cursor_right() {
+void move_screen_cursor_right() {
     state.cursor.column++;
     if (state.cursor.column > state.document.lines[state.cursor.line].size)
     {
@@ -315,7 +277,7 @@ void move_cursor_right() {
     
 }
 
-void move_cursor_left() {
+void move_screen_cursor_left() {
     state.cursor.column--;
     if (state.cursor.column < 0)
     {
@@ -323,7 +285,6 @@ void move_cursor_left() {
         state.cursor.line = max(state.cursor.line - 1, 0);
     }
 }
-
 
 void handle_edit_input(const input_t *input) {
     if (input->length == 1)
@@ -359,16 +320,16 @@ void handle_edit_input(const input_t *input) {
                 switch (input->pressed_key[2])
                 {
                 case 'A':
-                    move_cursor_up();
+                    move_screen_cursor_up();
                     break;
                 case 'B':
-                    move_cursor_down();
+                    move_screen_cursor_down();
                     break;
                 case 'C':
-                    move_cursor_right();
+                    move_screen_cursor_right();
                     break;
                 case 'D':
-                    move_cursor_left();
+                    move_screen_cursor_left();
                     break;
                 case '3':
                     if (input->pressed_key[3] == '~')
@@ -397,6 +358,10 @@ void handle_command_input(const input_t *input) {
         set_mode(MODE_SAVE);
         show_cursor();
         break;
+    case 'a':
+        set_mode(MODE_INSERT_FILE);
+        show_cursor();
+        break;
     case 'q':
         state.should_close = 1;
         break;
@@ -411,7 +376,7 @@ int is_allowed_character(unsigned int chr) {
 }
 
 void file_save() {
-    int fd = open(state.filename.name, O_WRONLY | O_TRUNC | O_CREAT, 0644);
+    int fd = open(state.filename_open.name, O_WRONLY | O_TRUNC | O_CREAT, 0644);
     save_str_t to_save = document_to_string(&state.document);
     write(fd, to_save.text, to_save.size);
     close(fd);
@@ -424,7 +389,7 @@ void handle_save_input(const input_t *input) {
 
         if (is_allowed_character(key))
         {
-            filename_add_char(&state.filename, key, state.filename_cursor.column);
+            filename_add_char(&state.filename_open, &state.filename_open_cursor, key, state.filename_open_cursor.column);
             return;
         }
         
@@ -436,7 +401,7 @@ void handle_save_input(const input_t *input) {
             hide_cursor();
             break;
         case 0x7f:
-            filename_delete_char(&state.filename, state.filename_cursor.column);
+            filename_delete_char(&state.filename_open, &state.filename_open_cursor, state.filename_open_cursor.column);
             break;
         case 0xa:
             file_save();
@@ -456,10 +421,61 @@ void handle_save_input(const input_t *input) {
                 switch (input->pressed_key[2])
                 {
                 case 'C':
-                    move_filename_cursor_right();
+                    move_filename_cursor_right(&state.filename_open, &state.filename_open_cursor);
                     break;
                 case 'D':
-                    move_filename_cursor_left();
+                    move_filename_cursor_left(&state.filename_open_cursor);
+                    break;
+                }
+            }
+        }
+    }
+}
+
+void handle_insert_input(const input_t *input) {
+    if (input->length == 1) {
+        const char key = input->pressed_key[0];
+
+        if (is_allowed_character(key))
+        {
+            filename_add_char(&state.filename_insert, &state.filename_insert_cursor, key, state.filename_insert_cursor.column);
+            return;
+        }
+        
+
+        switch (key)
+        {
+        case 0x1b:
+            set_mode(MODE_COMMAND);
+            hide_cursor();
+            break;
+        case 0x7f:
+            filename_delete_char(&state.filename_insert, &state.filename_insert_cursor, state.filename_insert_cursor.column);
+            break;
+        case 0xa:
+            file_insert(state.filename_insert.name);
+            filename_clear(&state.filename_insert);
+            state.filename_insert_cursor.column = 0;
+            set_mode(MODE_COMMAND);
+            hide_cursor();
+            break;
+
+        default:
+            break;
+        }
+    }
+    else {
+        if (input->pressed_key[0] == 0x1b)
+        {
+            if (input->pressed_key[1] == '[')
+            {
+                switch (input->pressed_key[2])
+                {
+                case 'C':
+                    move_filename_cursor_right(&state.filename_insert, &state.filename_insert_cursor);
+                    break;
+                case 'D':
+                    move_filename_cursor_left(&state.filename_insert_cursor);
                     break;
                 }
             }
@@ -504,6 +520,9 @@ void update() {
         case MODE_SAVE:
             handle_save_input(&state.input);
             break;
+        case MODE_INSERT_FILE:
+            handle_insert_input(&state.input);
+            break;
     }
 
     ensure_cursor_visible();
@@ -540,7 +559,8 @@ void render_command(int row_size) {
     memcpy(state.screen, strl("EDITOR VISUAL"));
     memcpy(state.screen + row_size, strl("s = salvar"));
     memcpy(state.screen + 2*row_size, strl("e = editar"));
-    memcpy(state.screen + 3*row_size, strl("q = sair"));
+    memcpy(state.screen + 3*row_size, strl("a = inserir arquivo"));
+    memcpy(state.screen + 4*row_size, strl("q = sair"));
 }
 
 void render_save(int row_size) {
@@ -548,9 +568,21 @@ void render_save(int row_size) {
     memcpy(state.screen + row_size, strl("Digite um nome"));
     memcpy(state.screen + 2*row_size, strl("esc = modo de comando"));
     memcpy(state.screen + 3*row_size, strl("enter = salvar"));
-    try_write(&state.filename, state.screen_length - row_size, max(state.filename_cursor.column - row_size, 0));
+    try_write(&state.filename_open, state.screen_length - row_size, max(state.filename_open_cursor.column - row_size, 0));
 
-    screen_cursor.col = state.filename_cursor.column + 1;
+    screen_cursor.col = state.filename_open_cursor.column + 1;
+    screen_cursor.row = state.window_size.ws_row;
+
+}
+
+void render_insert(int row_size) {
+    memcpy(state.screen, strl("EDITOR VISUAL"));
+    memcpy(state.screen + row_size, strl("Digite um nome"));
+    memcpy(state.screen + 2*row_size, strl("esc = modo de comando"));
+    memcpy(state.screen + 3*row_size, strl("enter = abrir"));
+    try_write(&state.filename_insert, state.screen_length - row_size, max(state.filename_insert_cursor.column - row_size, 0));
+
+    screen_cursor.col = state.filename_insert_cursor.column + 1;
     screen_cursor.row = state.window_size.ws_row;
 
 }
@@ -564,12 +596,14 @@ void render() {
         case MODE_EDIT:
             render_edit(row_size);
             break;
-
         case MODE_COMMAND:
             render_command(row_size);
             break;
         case MODE_SAVE:
             render_save(row_size);
+            break;
+        case MODE_INSERT_FILE:
+            render_insert(row_size);
             break;
     }
 
