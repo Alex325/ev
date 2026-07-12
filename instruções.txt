@@ -1,0 +1,10 @@
+Tenha CMake 3.10 no mínimo
+
+No diretório ev:
+
+Faça chmod 700 ./configure.sh ./debug.sh
+
+Execute debug.sh
+Execute ./build/Debug/main [nome do arquivo.txt]
+
+O arquivo só pode conter caracteres printáveis e quebra de linha :)
